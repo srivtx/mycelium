@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# mycelium CLI — convenience wrapper around zig build + solana program deploy.
+#
+# Usage:
+#   mycelium new <name>            Scaffold a new program in examples/<name>/
+#   mycelium build <name>          Build examples/<name> -> zig-out/lib/<name>.so
+#   mycelium deploy <name>         Build + deploy to the active Solana cluster
+#   mycelium test                  Run host-side unit tests (zig build test)
+#   mycelium bench                 Run the 4-way (anchor/v1/v2/v3) CU benchmark
+#   mycelium validator             Start a local solana-test-validator
+#   mycelium help                  Show this help
+
+set -euo pipefail
+
+# Anchor self to the mycelium repo root regardless of cwd.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+ROOT="$(cd -- "${SCRIPT_DIR}/.." &> /dev/null && pwd)"
+
+bold() { printf "\033[1m%s\033[0m\n" "$*"; }
+err()  { printf "\033[31merror:\033[0m %s\n" "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------
+# mycelium new <name>
+#
+# Drop a `examples/<name>/src/main.zig` from the template, with all
+# `__NAME__` placeholders substituted. Print the build.zig snippet the user
+# needs to paste (we deliberately don't edit build.zig automatically — the
+# user should see what's being added).
+# ---------------------------------------------------------------------
+cmd_new() {
+    local name="${1:-}"
+    [ -z "$name" ] && err "usage: mycelium new <name>"
+    [[ "$name" =~ ^[a-z][a-z0-9_]*$ ]] || err "name must be snake_case ([a-z0-9_]); got '$name'"
+
+    local dest="$ROOT/examples/$name"
+    [ -e "$dest" ] && err "$dest already exists"
+
+    local template="$ROOT/tools/templates/minimal.zig"
+    [ -f "$template" ] || err "template not found: $template"
+
+    mkdir -p "$dest/src"
+    sed "s/__NAME__/$name/g" "$template" > "$dest/src/main.zig"
+
+    bold "Created examples/$name/src/main.zig"
+    echo ""
+    echo "Add to build.zig (inside pub fn build, alongside the other addOnchainProgram calls):"
+    echo ""
+    echo "    addOnchainProgram(b, .{"
+    echo "        .name = \"$name\","
+    echo "        .root = \"examples/$name/src/main.zig\","
+    echo "        .step_name = \"$name\","
+    echo "    });"
+    echo ""
+    echo "Then:"
+    echo "    mycelium build $name"
+    echo "    mycelium deploy $name"
+}
+
+# ---------------------------------------------------------------------
+# mycelium build <name>
+# ---------------------------------------------------------------------
+cmd_build() {
+    local name="${1:-}"
+    [ -z "$name" ] && err "usage: mycelium build <name>"
+    (cd "$ROOT" && zig build "$name")
+    local so="$ROOT/zig-out/lib/$name.so"
+    [ -f "$so" ] && bold "Built $so ($(wc -c < "$so") bytes)"
+}
+
+# ---------------------------------------------------------------------
+# mycelium deploy <name>
+# ---------------------------------------------------------------------
+cmd_deploy() {
+    local name="${1:-}"
+    [ -z "$name" ] && err "usage: mycelium deploy <name>"
+    cmd_build "$name"
+    local so="$ROOT/zig-out/lib/$name.so"
+    [ -f "$so" ] || err "build output not found: $so"
+
+    bold "Deploying $so..."
+    solana program deploy "$so"
+}
+
+# ---------------------------------------------------------------------
+# mycelium test
+# ---------------------------------------------------------------------
+cmd_test() {
+    (cd "$ROOT" && zig build test --summary all)
+}
+
+# ---------------------------------------------------------------------
+# mycelium bench
+# ---------------------------------------------------------------------
+cmd_bench() {
+    local bench_dir="$ROOT/../anchor-bench"
+    [ -d "$bench_dir" ] || err "anchor-bench/ not found alongside mycelium/"
+    [ -f "$bench_dir/scripts/bench_v3.mjs" ] || err "bench script missing"
+
+    if ! solana cluster-version --url http://127.0.0.1:8899 > /dev/null 2>&1; then
+        err "no validator at 127.0.0.1:8899. Run: mycelium validator"
+    fi
+
+    bold "Running 4-way benchmark (anchor vs mycelium v1/v2/v3)..."
+    (cd "$bench_dir" && node scripts/bench_v3.mjs "$@")
+}
+
+# ---------------------------------------------------------------------
+# mycelium validator
+# ---------------------------------------------------------------------
+cmd_validator() {
+    bold "Starting solana-test-validator (Ctrl-C to stop)..."
+    rm -rf /tmp/mycelium-ledger
+    exec solana-test-validator --reset --quiet --ledger /tmp/mycelium-ledger
+}
+
+# ---------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------
+case "${1:-help}" in
+    new)        shift; cmd_new "$@" ;;
+    build)      shift; cmd_build "$@" ;;
+    deploy)     shift; cmd_deploy "$@" ;;
+    test)       shift; cmd_test "$@" ;;
+    bench)      shift; cmd_bench "$@" ;;
+    validator)  shift; cmd_validator "$@" ;;
+    help|-h|--help)
+        sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//'
+        ;;
+    *)
+        err "unknown subcommand: $1 (try 'mycelium help')"
+        ;;
+esac

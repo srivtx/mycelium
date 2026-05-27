@@ -1,0 +1,16 @@
+.{
+    .name = .mycelium,
+    .version = "0.1.0",
+    .fingerprint = 0xdf335270ba7e7641,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tools",
+        "examples",
+        "README.md",
+        "ARCHITECTURE.md",
+    },
+    .dependencies = .{},
+}
