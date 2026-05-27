@@ -1,7 +1,7 @@
 .{
     .name = .mycelium,
     .version = "0.1.0",
-    .fingerprint = 0xdf335270ba7e7641,
+    .fingerprint = 0xdf335270e0faad2b,
     .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
@@ -9,8 +9,10 @@
         "src",
         "tools",
         "examples",
+        "assets",
+        "docs",
         "README.md",
-        "ARCHITECTURE.md",
+        "LICENSE",
     },
     .dependencies = .{},
 }
