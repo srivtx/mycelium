@@ -1,41 +1,163 @@
 #!/usr/bin/env bash
-# mycelium CLI — convenience wrapper around zig build + solana program deploy.
+# mycelium CLI — install, scaffold, build, deploy, test, bench.
 #
 # Usage:
-#   mycelium new <name>            Scaffold a new program in examples/<name>/
-#   mycelium build <name>          Build examples/<name> -> zig-out/lib/<name>.so
-#   mycelium deploy <name>         Build + deploy to the active Solana cluster
-#   mycelium test                  Run host-side unit tests (zig build test)
-#   mycelium bench                 Run the 4-way (anchor/v1/v2/v3) CU benchmark
-#   mycelium validator             Start a local solana-test-validator
-#   mycelium help                  Show this help
+#   mycelium init <name>           Scaffold a standalone project in ./<name>/
+#   mycelium new <name>            Add an example inside the mycelium repo (contributors)
+#   mycelium build [name]          Build program (.so)
+#   mycelium deploy [name]         Build + solana program deploy
+#   mycelium test                  Run framework host-side tests
+#   mycelium bench                 Run 4-way CU benchmark (needs validator + anchor-bench)
+#   mycelium validator             Start solana-test-validator
+#   mycelium doctor                Check toolchain
+#   mycelium help
 
 set -euo pipefail
 
-# Anchor self to the mycelium repo root regardless of cwd.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-ROOT="$(cd -- "${SCRIPT_DIR}/.." &> /dev/null && pwd)"
+FRAMEWORK_ROOT="$(cd -- "${SCRIPT_DIR}/.." &> /dev/null && pwd)"
+MYCELIUM_HOME="${MYCELIUM_HOME:-$FRAMEWORK_ROOT}"
 
 bold() { printf "\033[1m%s\033[0m\n" "$*"; }
+ok()   { printf "\033[32mok\033[0m   %s\n" "$*"; }
+fail() { printf "\033[31mfail\033[0m %s\n" "$*"; }
 err()  { printf "\033[31merror:\033[0m %s\n" "$*" >&2; exit 1; }
 
+validate_name() {
+    local name="$1"
+    [[ "$name" =~ ^[a-z][a-z0-9_]*$ ]] || err "name must be snake_case ([a-z0-9_]); got '$name'"
+}
+
+inplace_replace() {
+    local file="$1"
+    local from="$2"
+    local to="$3"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$file" "$from" "$to" <<'PY'
+import sys, pathlib
+path = pathlib.Path(sys.argv[1])
+src = path.read_text()
+src2 = src.replace(sys.argv[2], sys.argv[3])
+path.write_text(src2)
+PY
+        return
+    fi
+    if command -v perl >/dev/null 2>&1; then
+        perl -0777 -pe "s/\\Q$from\\E/$to/g" -i "$file"
+        return
+    fi
+    # Fallback: best-effort sed (may be platform-specific).
+    sed -i "s|$from|$to|g" "$file"
+}
+
+# True when cwd looks like a `mycelium init` project (not the framework monorepo).
+is_project_dir() {
+    [ -f "build.zig" ] && [ -f "src/main.zig" ] && [ -f "build.zig.zon" ]
+}
+
+# Framework monorepo root (has examples/ and src/root.zig).
+is_framework_dir() {
+    local root="$1"
+    [ -d "$root/examples" ] && [ -f "$root/src/root.zig" ]
+}
+
+project_program_name() {
+    if [ -f build.zig.zon ]; then
+        local n
+        n=$(grep -E '^[[:space:]]*\.name[[:space:]]*=[[:space:]]*\.' build.zig.zon | head -1 | sed -E 's/.*\.name[[:space:]]*=[[:space:]]*\.([^,[:space:]]+).*/\1/')
+        [ -n "$n" ] && echo "$n" && return
+    fi
+    basename "$(pwd)"
+}
+
+resolve_framework_root() {
+    if is_framework_dir "$MYCELIUM_HOME"; then
+        echo "$MYCELIUM_HOME"
+        return
+    fi
+    if is_framework_dir "$FRAMEWORK_ROOT"; then
+        echo "$FRAMEWORK_ROOT"
+        return
+    fi
+    err "MYCELIUM_HOME is not a mycelium checkout (missing src/root.zig or examples/). Run the installer or set MYCELIUM_HOME."
+}
+
 # ---------------------------------------------------------------------
-# mycelium new <name>
-#
-# Drop a `examples/<name>/src/main.zig` from the template, with all
-# `__NAME__` placeholders substituted. Print the build.zig snippet the user
-# needs to paste (we deliberately don't edit build.zig automatically — the
-# user should see what's being added).
+# mycelium init <name>
+# ---------------------------------------------------------------------
+cmd_init() {
+    local name="${1:-}"
+    [ -z "$name" ] && err "usage: mycelium init <name>"
+    validate_name "$name"
+
+    local fw
+    fw="$(resolve_framework_root)"
+
+    local dest="./$name"
+    [ -e "$dest" ] && err "$dest already exists"
+
+    local tpl="$fw/tools/templates/project"
+    [ -d "$tpl" ] || err "project template missing: $tpl"
+
+    mkdir -p "$dest"
+    cp -R "$tpl/build" "$dest/build"
+    cp "$tpl/build.zig" "$tpl/build.zig.zon" "$tpl/.gitignore" "$dest/"
+    mkdir -p "$dest/src"
+    cp "$tpl/src/main.zig" "$dest/src/main.zig"
+
+    # Substitute placeholders.
+    inplace_replace "$dest/build.zig" "__NAME__" "$name"
+    inplace_replace "$dest/src/main.zig" "__NAME__" "$name"
+    inplace_replace "$dest/build.zig.zon" "__NAME__" "$name"
+
+    # Zig 0.16 requires a correct build.zig.zon fingerprint. The template ships
+    # with a placeholder; compute and patch the suggested value first.
+    if command -v zig >/dev/null 2>&1; then
+        local sug
+        sug="$(
+            (cd "$dest" && (zig build 2>&1 || true)) \
+              | sed -n -E 's/.*(suggested value|use this value): (0x[0-9a-fA-F]+).*/\2/p' \
+              | head -1
+        )"
+        if [ -n "${sug:-}" ]; then
+            inplace_replace "$dest/build.zig.zon" ".fingerprint = 0x0," ".fingerprint = $sug,"
+        fi
+    else
+        err "zig not found; install Zig 0.16 and re-run: mycelium init $name"
+    fi
+
+    # Add mycelium as a Zig dependency using a pinned tarball URL.
+    # This avoids `.path = \"/abs/path\"` which Zig rejects in build.zig.zon.
+    local ref url
+    ref="$(git -C "$fw" rev-parse HEAD 2>/dev/null || echo "main")"
+    url="https://github.com/srivtx/mycelium/archive/${ref}.tar.gz"
+    (cd "$dest" && zig fetch --save-exact=mycelium "$url" >/dev/null) || \
+        err "zig fetch failed; check network access and try again"
+
+    bold "Created $dest/"
+    echo ""
+    echo "  cd $name"
+    echo "  mycelium build"
+    echo "  mycelium deploy    # requires solana-cli + localnet/mainnet config"
+    echo ""
+    echo "MYCELIUM_HOME → $fw"
+}
+
+# ---------------------------------------------------------------------
+# mycelium new <name>  (monorepo examples/)
 # ---------------------------------------------------------------------
 cmd_new() {
     local name="${1:-}"
     [ -z "$name" ] && err "usage: mycelium new <name>"
-    [[ "$name" =~ ^[a-z][a-z0-9_]*$ ]] || err "name must be snake_case ([a-z0-9_]); got '$name'"
+    validate_name "$name"
 
-    local dest="$ROOT/examples/$name"
+    local fw
+    fw="$(resolve_framework_root)"
+
+    local dest="$fw/examples/$name"
     [ -e "$dest" ] && err "$dest already exists"
 
-    local template="$ROOT/tools/templates/minimal.zig"
+    local template="$fw/tools/templates/minimal.zig"
     [ -f "$template" ] || err "template not found: $template"
 
     mkdir -p "$dest/src"
@@ -43,7 +165,7 @@ cmd_new() {
 
     bold "Created examples/$name/src/main.zig"
     echo ""
-    echo "Add to build.zig (inside pub fn build, alongside the other addOnchainProgram calls):"
+    echo "Add to $fw/build.zig:"
     echo ""
     echo "    addOnchainProgram(b, .{"
     echo "        .name = \"$name\","
@@ -51,32 +173,58 @@ cmd_new() {
     echo "        .step_name = \"$name\","
     echo "    });"
     echo ""
-    echo "Then:"
-    echo "    mycelium build $name"
-    echo "    mycelium deploy $name"
+    echo "Then:  cd \"$fw\" && mycelium build $name"
 }
 
 # ---------------------------------------------------------------------
-# mycelium build <name>
+# mycelium build [name]
 # ---------------------------------------------------------------------
 cmd_build() {
     local name="${1:-}"
-    [ -z "$name" ] && err "usage: mycelium build <name>"
-    (cd "$ROOT" && zig build "$name")
-    local so="$ROOT/zig-out/lib/$name.so"
-    [ -f "$so" ] && bold "Built $so ($(wc -c < "$so") bytes)"
+
+    if is_project_dir; then
+        local prog
+        prog="$(project_program_name)"
+        (cd "$(pwd)" && zig build "$prog")
+        local so="zig-out/lib/${prog}.so"
+        [ -f "$so" ] && bold "Built $so ($(wc -c < "$so" | tr -d ' ') bytes)"
+        return
+    fi
+
+    [ -z "$name" ] && err "usage: mycelium build <name>   (or run from a project directory with src/main.zig)"
+
+    local fw
+    fw="$(resolve_framework_root)"
+    (cd "$fw" && zig build "$name")
+    local so="$fw/zig-out/lib/$name.so"
+    [ -f "$so" ] && bold "Built $so ($(wc -c < "$so" | tr -d ' ') bytes)"
 }
 
 # ---------------------------------------------------------------------
-# mycelium deploy <name>
+# mycelium deploy [name]
 # ---------------------------------------------------------------------
 cmd_deploy() {
     local name="${1:-}"
-    [ -z "$name" ] && err "usage: mycelium deploy <name>"
-    cmd_build "$name"
-    local so="$ROOT/zig-out/lib/$name.so"
-    [ -f "$so" ] || err "build output not found: $so"
 
+    if is_project_dir; then
+        cmd_build
+        local prog
+        prog="$(project_program_name)"
+        local so="zig-out/lib/${prog}.so"
+        [ -f "$so" ] || err "build output not found: $so"
+        command -v solana >/dev/null 2>&1 || err "solana-cli not found (install via docs/QUICKSTART.md)"
+        bold "Deploying $so..."
+        solana program deploy "$so"
+        return
+    fi
+
+    [ -z "$name" ] && err "usage: mycelium deploy <name>   (or run from a project directory)"
+    cmd_build "$name"
+    local fw
+    fw="$(resolve_framework_root)"
+    local so="$fw/zig-out/lib/$name.so"
+    [ -f "$so" ] || err "build output not found: $so"
+    command -v solana >/dev/null 2>&1 || err "solana-cli not found"
     bold "Deploying $so..."
     solana program deploy "$so"
 }
@@ -85,16 +233,21 @@ cmd_deploy() {
 # mycelium test
 # ---------------------------------------------------------------------
 cmd_test() {
-    (cd "$ROOT" && zig build test --summary all)
+    local fw
+    fw="$(resolve_framework_root)"
+    (cd "$fw" && zig build test --summary all)
 }
 
 # ---------------------------------------------------------------------
 # mycelium bench
 # ---------------------------------------------------------------------
 cmd_bench() {
-    local bench_dir="$ROOT/../anchor-bench"
+    local fw
+    fw="$(resolve_framework_root)"
+    local bench_dir
+    bench_dir="$(cd "$fw/.." && pwd)/anchor-bench"
+    [ -d "$bench_dir" ] || bench_dir="$(cd "$fw/../anchor-bench" 2>/dev/null && pwd)" || true
     [ -d "$bench_dir" ] || err "anchor-bench/ not found alongside mycelium/"
-    [ -f "$bench_dir/scripts/bench_v3.mjs" ] || err "bench script missing"
 
     if ! solana cluster-version --url http://127.0.0.1:8899 > /dev/null 2>&1; then
         err "no validator at 127.0.0.1:8899. Run: mycelium validator"
@@ -108,23 +261,85 @@ cmd_bench() {
 # mycelium validator
 # ---------------------------------------------------------------------
 cmd_validator() {
+    command -v solana-test-validator >/dev/null 2>&1 || err "solana-test-validator not found"
     bold "Starting solana-test-validator (Ctrl-C to stop)..."
     rm -rf /tmp/mycelium-ledger
     exec solana-test-validator --reset --quiet --ledger /tmp/mycelium-ledger
 }
 
 # ---------------------------------------------------------------------
+# mycelium doctor
+# ---------------------------------------------------------------------
+cmd_doctor() {
+    bold "mycelium doctor"
+    echo ""
+
+    local fw
+    if fw="$(resolve_framework_root 2>/dev/null)"; then
+        ok "MYCELIUM_HOME → $fw"
+    else
+        fail "MYCELIUM_HOME → not configured or invalid"
+        fw=""
+    fi
+
+    if command -v mycelium >/dev/null 2>&1; then
+        ok "mycelium CLI → $(command -v mycelium)"
+    else
+        fail "mycelium CLI → not on PATH"
+    fi
+
+    if command -v zig >/dev/null 2>&1; then
+        ok "zig → $(zig version 2>/dev/null | head -1)"
+    else
+        fail "zig → not found (brew install zig)"
+    fi
+
+    if command -v sbpf-linker >/dev/null 2>&1; then
+        ok "sbpf-linker → $(command -v sbpf-linker)"
+    else
+        fail "sbpf-linker → not found (cargo install sbpf-linker)"
+    fi
+
+    if command -v solana >/dev/null 2>&1; then
+        ok "solana → $(solana --version 2>/dev/null | head -1)"
+    else
+        fail "solana → not found (optional; see docs/QUICKSTART.md)"
+    fi
+
+    if [ -n "$fw" ] && [ -f "$fw/build/onchain.zig" ]; then
+        ok "onchain build helper → present"
+    elif [ -n "$fw" ]; then
+        fail "onchain build helper → missing at $fw/build/onchain.zig"
+    fi
+
+    echo ""
+    if is_project_dir; then
+        echo "Project directory detected ($(project_program_name))."
+        echo "  mycelium build"
+    else
+        echo "Next:  mycelium init demo && cd demo && mycelium build"
+    fi
+}
+
+# ---------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------
 case "${1:-help}" in
+    init)       shift; cmd_init "$@" ;;
     new)        shift; cmd_new "$@" ;;
     build)      shift; cmd_build "$@" ;;
     deploy)     shift; cmd_deploy "$@" ;;
     test)       shift; cmd_test "$@" ;;
     bench)      shift; cmd_bench "$@" ;;
     validator)  shift; cmd_validator "$@" ;;
+    doctor)     cmd_doctor ;;
     help|-h|--help)
-        sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '4,14p' "$0" | sed 's/^# \{0,1\}//'
+        echo ""
+        echo "Install:"
+        echo "  curl -fsSL https://raw.githubusercontent.com/srivtx/mycelium/main/install.sh | bash"
+        echo ""
+        echo "Use 'init' for a standalone project; 'new' only inside the framework repo."
         ;;
     *)
         err "unknown subcommand: $1 (try 'mycelium help')"
