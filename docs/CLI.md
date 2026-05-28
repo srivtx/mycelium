@@ -14,14 +14,31 @@ alias mycelium="$PWD/tools/mycelium"
 ## Commands
 
 ```text
+mycelium init <name>           Scaffold a standalone project in ./<name>/
 mycelium new <name>            Scaffold a new program in examples/<name>/
-mycelium build <name>          Build examples/<name> → zig-out/lib/<name>.so
-mycelium deploy <name>         Build + deploy to the active Solana cluster
+mycelium build [name]          Build program (.so)
+mycelium deploy [name]         Build + deploy to the active Solana cluster
 mycelium test                  Run host-side unit tests (zig build test)
 mycelium bench                 Run the 4-way (anchor / v1 / v2 / v3) CU benchmark
 mycelium validator             Start a local solana-test-validator
+mycelium doctor                Check toolchain
 mycelium help                  Show usage
 ```
+
+### `mycelium init <name>`
+
+Creates a **standalone** mycelium program project in `./<name>/` (like
+`anchor init`). The project includes its own `build.zig` and builds a
+single on-chain `.so`.
+
+```sh
+mycelium init demo
+cd demo
+mycelium build
+mycelium deploy
+```
+
+This is the recommended path for app developers.
 
 ### `mycelium new <name>`
 

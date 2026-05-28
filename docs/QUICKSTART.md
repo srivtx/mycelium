@@ -100,14 +100,17 @@ mycelium deploy vault_v3
 ## 4. Scaffold a new program
 
 ```sh
-mycelium new my_program
-# patches one line into build.zig (the CLI prints it)
-mycelium build my_program
-mycelium deploy my_program
+mycelium init my_program
+cd my_program
+mycelium build
+mycelium deploy
 ```
 
 The scaffold is a **53-line counter program** with PDA-owned state,
 an `initialize` instruction, and an authority-gated `increment`.
 Deploys to a ~14 KB `.so`.
+
+If you’re contributing to the mycelium framework itself, `mycelium new <name>`
+adds an example program under `mycelium/examples/<name>/` (monorepo-only).
 
 See [CLI.md](./CLI.md) for the full command reference.

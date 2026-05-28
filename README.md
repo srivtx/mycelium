@@ -29,16 +29,13 @@ byte-identical to what you would have written by hand.
 
 - **2–5× fewer CU than Anchor 1.0**, **9× smaller** on chain
 - A complete PDA vault — state, three instructions, every edge case — is **62 lines** of Zig
-- `mycelium new my_program` scaffolds a deployable program in under 30 seconds
+- `mycelium init demo` scaffolds a standalone project like Anchor
 
 ## Install
 
 ```sh
-brew install zig llvm@21
-cargo install sbpf-linker
-
-git clone https://github.com/srivtx/mycelium
-cd mycelium && zig build test
+curl -fsSL https://raw.githubusercontent.com/srivtx/mycelium/main/install.sh | bash
+mycelium init demo && cd demo && mycelium build
 ```
 
 Full setup (LLVM symlinks, validator, etc.) in [QUICKSTART.md](./docs/QUICKSTART.md).
